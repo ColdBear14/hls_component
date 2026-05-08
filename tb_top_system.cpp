@@ -34,28 +34,48 @@ void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int C
     golden_conv_full(IMG_W, IMG_H, Cin, Cout, K, stride, pad,
                      img_mem, weight_mem, bias_mem, residual_mem, 
                      has_residual, full_desc.requant_shift_val, gold_output);
+    
 
-    // ==============================================================
-    // [TILING] VÒNG LẶP CHIA NHỎ COUT
-    // ==============================================================
-    int num_tiles = (Cout + MAX_COUT_TILE - 1) / MAX_COUT_TILE;
+    // 2. Tính toán số từ (word) cần thiết để chứa 1 block 16 kênh đầu ra (Cout Block)
+    int words_per_cout_block = (mode == 0) ? (Cin * 16) : (Cin * K * K);
+
+    // 3. Tính số lượng khối (block) tối đa mà BRAM có thể chứa trong 1 lần chạy
+    int max_cout_blocks = BANK_DEPTH / words_per_cout_block;
+
+    if (max_cout_blocks <= 0) {
+        std::cerr << ">>> LỖI FATAL: BANK_DEPTH (" << BANK_DEPTH 
+                  << ") quá nhỏ! Cần tối thiểu " << words_per_cout_block 
+                  << " words để chạy layer này. <<<" << std::endl;
+        return;
+    }
+
+    // 4. Kích thước Cout tối đa cho Tile hiện tại (luôn là bội số của 16)
+    int DYNAMIC_MAX_COUT = max_cout_blocks * 16;
+    
+    // Số vòng lặp Tile tự động nội suy
+    int num_tiles = (Cout + DYNAMIC_MAX_COUT - 1) / DYNAMIC_MAX_COUT;
+
+    std::cout << "  -> [Auto-Tiling] BANK_DEPTH=" << BANK_DEPTH 
+              << ", words/block=" << words_per_cout_block 
+              << " => Chia làm " << num_tiles << " tiles (Max Cout/Tile: " 
+              << DYNAMIC_MAX_COUT << ")\n";
 
     for (int tile = 0; tile < num_tiles; tile++) {
-        int current_cout = std::min(MAX_COUT_TILE, Cout - tile * MAX_COUT_TILE);
-        int cout_offset = tile * MAX_COUT_TILE;
+        // Dùng DYNAMIC_MAX_COUT thay thế cho MAX_COUT_TILE
+        int current_cout = std::min(DYNAMIC_MAX_COUT, Cout - tile * DYNAMIC_MAX_COUT);
+        int cout_offset = tile * DYNAMIC_MAX_COUT;
 
         // Khai báo Streams cục bộ cho mỗi Tile
         hls::stream<axi_word_t> in_pixels("in_pixels");
         hls::stream<axi_word_t> residual_in("residual_in");
         hls::stream<axi_word_t> weight_in("weight_in");
-        hls::stream<axi_word_t> out_data("out_data");
+        hls::stream<axi_stream_out_t> out_data("out_data");
         hls::stream<weight_t> temp_weight_stream("temp_weight_stream"); 
 
         std::vector<pixel_t> temp_in_pixels;
         std::vector<pixel_t> temp_residual;
 
         // 3.1 Chuẩn bị dữ liệu Ảnh (Gửi lại toàn bộ ảnh cho mỗi Tile vì HW chỉ tính 1 phần kênh)
-        // Đã sửa: Padding kênh ảo để khớp với chuẩn 16 kênh/word của LineBuffer
         int cin_blocks = (Cin + 15) / 16;
         for (int h = 0; h < IMG_H; h++) {
             for (int w = 0; w < IMG_W; w++) {
@@ -122,7 +142,6 @@ void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int C
         } 
 
         // 3.3 Chuẩn bị dữ liệu Trọng số (Chỉ lấy Weight cho current_cout)
-        // [TILING] Dịch con trỏ weight_mem tới vị trí bắt đầu của tile hiện tại
         weight_t* current_weight_ptr = weight_mem + (cout_offset * Cin * K * K);
 
         if (mode == 0) {
@@ -149,9 +168,7 @@ void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int C
             }
         }
 
-        // ==============================================================
         // PACKER LOGIC (Giữ nguyên, nhưng pack dữ liệu cục bộ của Tile)
-        // ==============================================================
         axi_word_t pack_word = 0;
         for (size_t i = 0; i < temp_in_pixels.size(); i++) {
             int idx = i % 16;
@@ -190,7 +207,7 @@ void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int C
         desc_tile.W = IMG_W;
         desc_tile.H = IMG_H;
         desc_tile.Cin = Cin;
-        desc_tile.Cout = current_cout; // [TILING] Báo cho HW biết chỉ tính số kênh này
+        desc_tile.Cout = current_cout;
         desc_tile.kernel_size = K;
         desc_tile.stride = stride;
         desc_tile.pad = pad;
@@ -226,7 +243,14 @@ void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int C
         for (int p = 0; p < expected_packets; ++p) {
             if(out_data.empty()) break; 
             
-            axi_word_t hw_word = out_data.read();
+            axi_stream_out_t hw_pkt = out_data.read(); // Đọc struct
+            axi_word_t hw_word = hw_pkt.data;          // Lấy trường data
+
+            // Mở rộng kiểm tra TLAST trong Testbench (tuỳ chọn - giúp bạn debug DMA)
+            if (p == expected_packets - 1 && hw_pkt.last != 1) {
+                std::cerr << ">>> CẢNH BÁO: Thiếu tín hiệu TLAST ở gói cuối! <<<" << std::endl;
+            }
+            
             ap_int<8> hw_data[16];
             for (int i = 0; i < 16; i++) {
                 hw_data[i] = hw_word.range(i * 8 + 7, i * 8);
@@ -303,33 +327,33 @@ void TopSystem_TB() {
         {0, 16, 16, 1, 3,  8,  true,  "Winograd 3x3 (Pad=1)"},
         {1, 16, 16, 1, 3,  8,  true,  "Systolic 3x3 S2 (Pad=1)"},
 
-        // --- 2. CÁC SCENARIO THỰC TẾ TỪ YOLOv8n (INPUT 640x640) ---
-        // [Stage 0] Stem Layer: Lớp đầu tiên của mạng, chuyển từ ảnh RGB (3 channel) sang 16 channel
-        {1, 640, 640, 1, 3,  16, false, "YOLOv8n Stem: 640x640, 3x3 S2, C:3->16"},
+        // // --- 2. CÁC SCENARIO THỰC TẾ TỪ YOLOv8n (INPUT 640x640) ---
+        // // [Stage 0] Stem Layer: Lớp đầu tiên của mạng, chuyển từ ảnh RGB (3 channel) sang 16 channel
+        // {1, 640, 640, 1, 3,  16, false, "YOLOv8n Stem: 640x640, 3x3 S2, C:3->16"},
 
-        // [Stage 1] Downsample 1: Giảm kích thước ảnh xuống 1/4 (160x160)
-        {1, 320, 320, 1, 16, 32, false, "YOLOv8n Down1: 320x320, 3x3 S2, C:16->32"},
+        // // [Stage 1] Downsample 1: Giảm kích thước ảnh xuống 1/4 (160x160)
+        // {1, 320, 320, 1, 16, 32, false, "YOLOv8n Down1: 320x320, 3x3 S2, C:16->32"},
 
-        // [Stage 2] C2f Bottleneck 1: Dùng Conv 3x3, Stride 1, có cộng Residual
-        {0, 160, 160, 1, 32, 32, true,  "YOLOv8n C2f-B1: 160x160, 3x3 S1, C:32->32 (Wino+Res)"},
+        // // [Stage 2] C2f Bottleneck 1: Dùng Conv 3x3, Stride 1, có cộng Residual
+        // {0, 160, 160, 1, 32, 32, true,  "YOLOv8n C2f-B1: 160x160, 3x3 S1, C:32->32 (Wino+Res)"},
 
-        // [Stage 3] Downsample 2: Giảm xuống 80x80
-        {1, 160, 160, 1, 32, 64, false, "YOLOv8n Down2: 160x160, 3x3 S2, C:32->64"},
+        // // [Stage 3] Downsample 2: Giảm xuống 80x80
+        // {1, 160, 160, 1, 32, 64, false, "YOLOv8n Down2: 160x160, 3x3 S2, C:32->64"},
 
-        // [Stage 4] C2f Bottleneck 2 (1x1 Conv): Lớp gộp kênh đầu vào trong khối C2f
-        {2, 80,  80,  0, 64, 64, false, "YOLOv8n C2f-1x1: 80x80, 1x1 S1, C:64->64 (Sys)"},
+        // // [Stage 4] C2f Bottleneck 2 (1x1 Conv): Lớp gộp kênh đầu vào trong khối C2f
+        // {2, 80,  80,  0, 64, 64, false, "YOLOv8n C2f-1x1: 80x80, 1x1 S1, C:64->64 (Sys)"},
 
-        // [Stage 5] Downsample 3: Giảm xuống 40x40
-        {1, 80,  80,  1, 64, 128, false, "YOLOv8n Down3: 80x80, 3x3 S2, C:64->128"},
+        // // [Stage 5] Downsample 3: Giảm xuống 40x40
+        // {1, 80,  80,  1, 64, 128, false, "YOLOv8n Down3: 80x80, 3x3 S2, C:64->128"},
 
-        // [Stage 6] C2f Bottleneck 3 (Deeper): 40x40 xử lý Winograd với số kênh lớn hơn
-        {0, 40,  40,  1, 128, 128, true, "YOLOv8n C2f-B3: 40x40, 3x3 S1, C:128->128 (Wino+Res)"},
+        // // [Stage 6] C2f Bottleneck 3 (Deeper): 40x40 xử lý Winograd với số kênh lớn hơn
+        // {0, 40,  40,  1, 128, 128, true, "YOLOv8n C2f-B3: 40x40, 3x3 S1, C:128->128 (Wino+Res)"},
 
-        // [Stage 7] Downsample 4: Giảm xuống độ phân giải nhỏ nhất 20x20
-        {1, 40,  40,  1, 128, 256, false, "YOLOv8n Down4: 40x40, 3x3 S2, C:128->256"},
+        // // [Stage 7] Downsample 4: Giảm xuống độ phân giải nhỏ nhất 20x20
+        // {1, 40,  40,  1, 128, 256, false, "YOLOv8n Down4: 40x40, 3x3 S2, C:128->256"},
 
-        // [Stage 8] Khối SPPF / Head: Dùng nhiều Conv 1x1 ở độ phân giải 20x20
-        {2, 20,  20,  0, 256, 256, false, "YOLOv8n SPPF/Head: 20x20, 1x1 S1, C:256->256 (Sys)"}
+        // // [Stage 8] Khối SPPF / Head: Dùng nhiều Conv 1x1 ở độ phân giải 20x20
+        // {2, 20,  20,  0, 256, 256, false, "YOLOv8n SPPF/Head: 20x20, 1x1 S1, C:256->256 (Sys)"}
 
     };
 

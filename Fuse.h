@@ -6,7 +6,7 @@
 void fuse_post_conv(
     hls::stream<fuse_vec_in_t>& conv_in,
     hls::stream<fuse_vec_in_t>& residual_in,
-    hls::stream<axi_word_t>& fuse_out,
+    hls::stream<axi_stream_out_t>& fuse_out,
     hls::stream<ap_int<8>>& bias_array,
     hls::stream<FuseConfig>& config_stream
 );
