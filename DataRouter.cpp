@@ -48,11 +48,8 @@ void data_demux(
     #pragma HLS INLINE off
     
     DemuxDataConfig cfg = config_stream.read();
-    int num_tiles = cfg.num_tiles;
-    int Cin = cfg.Cin;
-    ap_uint<2> sel_val = mode_stream.read();
-    
-    int total_iters = num_tiles * Cin;
+    int total_iters     = cfg.num_tiles * cfg.Cin;
+    ap_uint<2> sel_val  = mode_stream.read();
 
     demux_flat_loop: for (int iter = 0; iter < total_iters; iter++) {
         #pragma HLS PIPELINE II=1
@@ -66,7 +63,7 @@ void data_demux(
             SysWindow sys_win;
             #pragma HLS ARRAY_PARTITION variable=sys_win.data complete
             
-            if(sel_val == 1) { 
+            if (sel_val == 1) { 
                 int idx = 0;
                 extract_3x3_row: for(int r=0; r<3; r++) {
                     #pragma HLS UNROLL
@@ -78,7 +75,7 @@ void data_demux(
             } 
             else if (sel_val == 2) { 
                 sys_win.data[0] = tile.data[0][0]; 
-                for(int z=1; z<9; z++) {
+                for(int z=1; z<KERNEL_SIZE; z++) {
                     #pragma HLS UNROLL
                     sys_win.data[z] = 0;
                 }

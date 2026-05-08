@@ -3,7 +3,7 @@
 void fuse_post_conv(
     hls::stream<fuse_vec_in_t>& conv_in,
     hls::stream<fuse_vec_in_t>& residual_in,
-    hls::stream<fuse_vec_out_t>& fuse_out,
+    hls::stream<axi_dma_out_t>& fuse_out,
     hls::stream<ap_int<8>>& bias_array,
     hls::stream<FuseConfig>& config_stream
 ) {
@@ -11,19 +11,20 @@ void fuse_post_conv(
     
     FuseConfig config = config_stream.read();
     int total_packets = config.total_packets; 
-    int channels = config.channel_limit;
+    int channels      = config.channel_limit;
     ap_int<8> shift_val = config.requant_shift_val;
 
-    // 1. KHỞI TẠO LOCAL BIAS CACHE
+    // --- 1. LOCAL BIAS CACHE ---
     ap_int<8> local_bias[MAX_CHANNELS];
     #pragma HLS BIND_STORAGE variable=local_bias type=ram_2p impl=lutram
     #pragma HLS ARRAY_PARTITION variable=local_bias cyclic factor=16 dim=1
 
-    // 2. NẠP BIAS TỪ DRAM VÀO BRAM NỘI BỘ 
+    // --- 2. LOAD BIAS FROM DRAM ---
     load_bias_loop: for (int i = 0; i < channels; i++) {
         #pragma HLS PIPELINE II=1
         local_bias[i] = bias_array.read();
     }
+    
     ap_uint<16> c = 0; 
 
     process_stream: for (int p = 0; p < total_packets; p++) {
@@ -31,68 +32,53 @@ void fuse_post_conv(
         
         fuse_vec_in_t in_pkt = conv_in.read();
         fuse_vec_in_t res_pkt;
+        axi_dma_out_t out_pkt;
         
-        if (config.has_residual) {
-            res_pkt = residual_in.read();
-        }
+        if (config.has_residual) res_pkt = residual_in.read();
 
-        fuse_vec_out_t out_pkt;
+        out_pkt.keep = 0xFFFF;
+        out_pkt.last = (p == total_packets - 1) ? 1 : 0;
 
         process_elements: for (int i = 0; i < FUSE_PARALLEL_SIZE; i++) {
             #pragma HLS UNROLL 
-            ap_uint<16> current_c; 
+            
+            ap_uint<16> current_c = (config.mode == 0) ? 
+                                    (c + (i / 4)) % channels : 
+                                    (c + i) % channels;
 
-            if(config.mode == 0) {
-                current_c = (c + (i / 4)) % channels;
-            } else {
-                current_c = (c + i) % channels;
-            }
-
-            // --- BƯỚC 1: Đọc Psum (Int32) ---
-            ap_int<32> acc = in_pkt.data[i];
-
-            // --- BƯỚC 2: Cộng Bias ---
+            // Step 1 & 2: Read Psum & Add Bias
+            ap_int<32> acc       = in_pkt.data[i];
             ap_int<32> with_bias = acc + local_bias[current_c];
 
-            // --- Bước 3: Activation (Leaky ReLU 0.1015625) ---
-            ap_int<32> relu_mult = with_bias * 13;
+            // Step 3: Activation (Leaky ReLU)
+            ap_int<32> relu_mult = with_bias * LEAKY_RELU_MULT;
             #pragma HLS BIND_OP variable=relu_mult op=mul impl=dsp
-            ap_int<32> activated = (with_bias < 0) ? (ap_int<32>)(relu_mult >> 7) : with_bias;
+            
+            ap_int<32> activated = (with_bias < 0) ? (ap_int<32>)(relu_mult >> LEAKY_RELU_SHIFT) : with_bias;
 
-            // --- BƯỚC 4: Requantize (Scale & Shift) ---
+            // Step 4: Requantize (Scale & Shift)
             ap_int<32> shifted = activated >> shift_val;
+            ap_int<8> requantized = (shifted > MAX_INT8) ? (ap_int<8>)MAX_INT8 : 
+                                    (shifted < MIN_INT8) ? (ap_int<8>)MIN_INT8 : (ap_int<8>)shifted;
 
-            ap_int<8> requantized = (shifted > 127) ? (ap_int<8>)127 : 
-                                    (shifted < -128) ? (ap_int<8>)-128 : (ap_int<8>)shifted;
-
-            // --- BƯỚC 5: Cộng Residual ---
+            // Step 5: Add Residual
             ap_int<8> final_pixel = requantized;
             
             if (config.has_residual) {
                 ap_int<9> add_result = (ap_int<9>)requantized + (ap_int<9>)res_pkt.data[i];
-                
-                final_pixel = (add_result > 127) ? (ap_int<8>)127 : 
-                              (add_result < -128) ? (ap_int<8>)-128 : (ap_int<8>)add_result;
+                final_pixel = (add_result > MAX_INT8) ? (ap_int<8>)MAX_INT8 : 
+                              (add_result < MIN_INT8) ? (ap_int<8>)MIN_INT8 : (ap_int<8>)add_result;
             }
 
-            // --- BƯỚC 6: Channel Masking / Slice ---
-            if (current_c < config.channel_limit) {
-                out_pkt.data[i] = final_pixel;
-            } else {
-                out_pkt.data[i] = 0;
-            }
+            // Step 6: Channel Masking
+            out_pkt.data[i] = (current_c < config.channel_limit) ? final_pixel : (ap_int<8>)0;
         }
         
         fuse_out.write(out_pkt);
 
-        if (config.mode == 0) {
-            c += (FUSE_PARALLEL_SIZE / 4);
-        } else {
-            c += FUSE_PARALLEL_SIZE;
-        }        
-        while (c >= channels) {
-            c -= channels;
-        }
+        // Update channel counter
+        c += (config.mode == 0) ? (FUSE_PARALLEL_SIZE / 4) : FUSE_PARALLEL_SIZE;
+        if (c >= channels) c -= channels;
     }
 }
 

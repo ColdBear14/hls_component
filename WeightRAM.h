@@ -5,7 +5,7 @@
 
 void load_weights(
     hls::stream<weight_t> &in_weights,
-    weight_t bram[NUM_BANKS][BANK_DEPTH], // Bỏ chiều [2], HLS sẽ tự biến nó thành Ping-Pong
+    weight_t bram[NUM_BANKS][BANK_DEPTH],
     int num_weights_per_tile
 );
 
@@ -27,7 +27,7 @@ void weight_controller_core(
 void weight_controller_top(
     hls::stream<weight_t> &in_weights,
     hls::stream<weight_mat_t> &out_weight_stream,
-    hls::stream<WeightRamConfig> &config_stream // Gộp 3 luồng int thành 1 luồng Struct
+    hls::stream<WeightRamConfig> &config_stream 
 );
 
 #endif
