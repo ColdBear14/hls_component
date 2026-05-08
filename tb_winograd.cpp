@@ -5,8 +5,8 @@ void WinogradEngine_TB(){
     Tile3x3 g_zero, g_max;
     
     for(int i=0; i<16; i++) {
-    d_zero.data[i/4][i%4] = 0;
-    d_max.data[i/4][i%4] = 255;
+        d_zero.data[i/4][i%4] = 0;
+        d_max.data[i/4][i%4] = 255;
     }
     for(int i=0; i<9; i++) {
         g_zero.data[i/3][i%3] = 0;
@@ -49,11 +49,9 @@ void WinogradEngine_TB(){
 
 void run_single_test(std::string test_name, Tile4x4 d, Tile3x3 g) {
     hls::stream<Tile4x4> in_tile_stream;
-    hls::stream<Tile4x4> weight_v_stream;
+    hls::stream<WeightBundle> weight_v_stream;
     hls::stream<Tile2x2> out_tile_stream;
     hls::stream<ap_uint<2>> mode_stream;
-    
-    // MỚI: Luồng cấu hình
     hls::stream<WinogradConfig> config_stream;
 
     std::cout << "\n--- TEST CASE: " << test_name << " ---" << std::endl;
@@ -61,8 +59,15 @@ void run_single_test(std::string test_name, Tile4x4 d, Tile3x3 g) {
     Tile4x4 v;
     weight_transform(g, v);
 
+    WeightBundle bundle;
+    bundle.weights[0] = v;
+    for(int i=1; i<COUT_UNROLL; i++) {
+        for(int r=0; r<4; r++) 
+            for(int c=0; c<4; c++) bundle.weights[i].data[r][c] = 0;
+    }
+
     in_tile_stream.write(d);
-    weight_v_stream.write(v);
+    weight_v_stream.write(bundle);
     mode_stream.write(0); 
     
     // Ghi num_tiles, Cin, Cout
@@ -95,7 +100,10 @@ void run_single_test(std::string test_name, Tile4x4 d, Tile3x3 g) {
 
 void test_multiple_tiles(int num_tiles) {
     hls::stream<Tile4x4> in_tile_stream;
-    hls::stream<Tile4x4> weight_v_stream;
+    
+    // Đã sửa: Đổi từ Tile4x4 thành WeightBundle để khớp với WinogradEngine
+    hls::stream<WeightBundle> weight_v_stream; 
+    
     hls::stream<Tile2x2> out_tile_stream;
     hls::stream<ap_uint<2>> mode_stream;
     hls::stream<WinogradConfig> config_stream;
@@ -105,6 +113,13 @@ void test_multiple_tiles(int num_tiles) {
     Tile3x3 g;
     for(int i=0; i<3; i++) for(int j=0; j<3; j++) g.data[i][j] = (i==j) ? 1 : 0;
     Tile4x4 v; weight_transform(g, v);
+
+    WeightBundle bundle;
+    bundle.weights[0] = v;
+    for(int i=1; i<COUT_UNROLL; i++) {
+        for(int r=0; r<4; r++) 
+            for(int c=0; c<4; c++) bundle.weights[i].data[r][c] = 0;
+    }
     
     config_stream.write({num_tiles, 1, 1});
     mode_stream.write(0);
@@ -113,7 +128,7 @@ void test_multiple_tiles(int num_tiles) {
         Tile4x4 d;
         for(int i=0; i<16; i++) d.data[i/4][i%4] = n + i; 
         in_tile_stream.write(d);
-        weight_v_stream.write(v);
+        weight_v_stream.write(bundle);
     }
 
     winograd_engine_top(in_tile_stream, weight_v_stream, out_tile_stream, 

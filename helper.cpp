@@ -46,28 +46,21 @@ void weight_transform(Tile3x3 g, Tile4x4 &V) {
     }
 }
 
-void fill_pixel_stream(hls::stream<pixel_t>& stream, int width, int height, int Cin) {
-    std::cout << "Khởi tạo Pixel Interleaved (Cin: " << Cin << ")" << std::endl;
-    std::cout << "\n=== PIXEL MATRIX ===" << std::endl;
-    
-    for (int y = 0; y < height; ++y) {
-        std::cout << "Row " << y << ": ";
-        for (int x = 0; x < width; ++x) {
-            std::cout << "[";
-            for(int cin = 0; cin < Cin; ++cin) {
-                // Tạo giá trị giả lập khác nhau giữa các pixel và kênh
-                pixel_t pixel = (x + y * width + cin + 1) & 0xFF;
-                stream.write(pixel);
-                
-                // In giá trị pixel
-                std::cout << (int)pixel;
-                if(cin < Cin - 1) std::cout << ",";
-            }
-            std::cout << "] ";
+void fill_axi_pixel_stream(hls::stream<axi_word_t>& in_stream, int W, int H, int Cin) {
+    int total_pixels = W * H * Cin;
+    axi_word_t pack_word = 0;
+    pixel_t dummy_val = 1; // Biến tăng dần để dễ kiểm tra
+
+    for (int i = 0; i < total_pixels; i++) {
+        int idx = i % 16;
+        pack_word.range(idx * 8 + 7, idx * 8) = dummy_val++;
+        
+        // Đủ 16 pixels hoặc pixel cuối cùng thì ghi vào stream
+        if (idx == 15 || i == total_pixels - 1) {
+            in_stream.write(pack_word);
+            pack_word = 0;
         }
-        std::cout << std::endl;
     }
-    std::cout << "===================\n" << std::endl;
 }
 
 void fill_weight_stream(hls::stream<weight_t>& stream, int kernel_size, int Cin, int Cout) {

@@ -27,7 +27,9 @@ void ewmm(Tile4x4 U, Tile4x4 V, Tile4x4 &M) {
         #pragma HLS UNROLL
         for (int j = 0; j < 4; j++) {
             #pragma HLS UNROLL
-            M.data[i][j] = U.data[i][j] * V.data[i][j];
+            ap_int<16> u_val = U.data[i][j];
+            ap_int<16> v_val = V.data[i][j];
+            M.data[i][j] = (ap_int<32>)(u_val * v_val);
         }
     }
 }
@@ -54,7 +56,7 @@ void output_transform(Tile4x4 M, Tile2x2 &Y) {
 
 void winograd_engine_top(
     hls::stream<Tile4x4> &in_tile_stream,  
-    hls::stream<Tile4x4> &weight_v_stream, 
+    hls::stream<WeightBundle> &weight_v_stream, // Thay đổi: Dùng Bundle thay vì Tile đơn lẻ
     hls::stream<Tile2x2> &out_tile_stream,  
     hls::stream<ap_uint<2>> &mode_stream,
     hls::stream<WinogradConfig> &config_stream
@@ -75,15 +77,10 @@ void winograd_engine_top(
 
     spatial_loop: for (int t = 0; t < num_tiles; t++) {
         
-        Tile2x2 acc_out[MAX_COUT];
-        #pragma HLS AGGREGATE variable=acc_out
-
-        init_acc: for(int cout = 0; cout < Cout; cout++) {
-            #pragma HLS UNROLL
-            for(int i = 0; i < 2; i++)
-                for(int j = 0; j < 2; j++)
-                    acc_out[cout].data[i][j] = 0;
-        }
+        Tile4x4 acc_m[MAX_COUT];
+        // Phân mảnh mảng acc_m theo chu kỳ (cyclic) để cho phép truy cập song song COUT_UNROLL phần tử
+        #pragma HLS ARRAY_PARTITION variable=acc_m cyclic factor=COUT_UNROLL dim=1
+        #pragma HLS BIND_STORAGE variable=acc_m type=ram_t2p impl=bram
 
         cin_loop: for (int cin = 0; cin < Cin; cin++) {
             Tile4x4 d_tile = in_tile_stream.read();
@@ -91,18 +88,40 @@ void winograd_engine_top(
             
             input_transform(d_tile, u_tile); 
 
-            cout_loop: for (int cout = 0; cout < Cout; cout++) {
+            // Bước nhảy của vòng lặp giờ là COUT_UNROLL thay vì 1
+            cout_loop: for (int cout = 0; cout < Cout; cout += COUT_UNROLL) {
                 #pragma HLS PIPELINE II=1
-                Tile4x4 v_tile = weight_v_stream.read();
-                Tile4x4 m_tile;
-                Tile2x2 y_tile;
+                #pragma HLS DEPENDENCE variable=acc_m type=inter false
 
-                ewmm(u_tile, v_tile, m_tile);
-                output_transform(m_tile, y_tile);
+                // Đọc COUT_UNROLL trọng số cùng lúc
+                WeightBundle w_bundle = weight_v_stream.read();
 
-                accumulate: for(int i = 0; i < 2; i++) {
-                    for(int j = 0; j < 2; j++) {
-                        acc_out[cout].data[i][j] += y_tile.data[i][j];
+                // Tính toán song song cho COUT_UNROLL kênh
+                compute_unroll: for (int u = 0; u < COUT_UNROLL; u++) {
+                    #pragma HLS UNROLL
+                    int actual_cout = cout + u;
+                    
+                    if (actual_cout < Cout) {
+                        Tile4x4 m_tile;
+                        ewmm(u_tile, w_bundle.weights[u], m_tile);
+
+                        if (cin == 0) {
+                            // Khởi tạo trực tiếp cho channel đầu tiên
+                            acc_m[actual_cout] = m_tile;
+                        } else {
+                            // Cộng dồn cho các channel tiếp theo
+                            Tile4x4 prev_acc = acc_m[actual_cout];
+                            Tile4x4 current_acc;
+
+                            for(int i = 0; i < 4; i++) {
+                                #pragma HLS UNROLL
+                                for(int j = 0; j < 4; j++) {
+                                    #pragma HLS UNROLL
+                                    current_acc.data[i][j] = prev_acc.data[i][j] + m_tile.data[i][j];
+                                }
+                            }
+                            acc_m[actual_cout] = current_acc;
+                        }
                     }
                 }
             }
@@ -111,12 +130,15 @@ void winograd_engine_top(
         write_out: for (int cout = 0; cout < Cout; cout++) {
             #pragma HLS PIPELINE II=1
             Tile2x2 final_tile;
+            Tile2x2 y_tile;
+
+            output_transform(acc_m[cout], y_tile);
 
             for(int i = 0; i < 2; i++) {
                 #pragma HLS UNROLL
                 for(int j = 0; j < 2; j++) {
                     #pragma HLS UNROLL
-                    data_t val = acc_out[cout].data[i][j];
+                    data_t val = y_tile.data[i][j];
                     if (val < 0 && (val % 4 != 0)) {
                         final_tile.data[i][j] = (val >> 2) + 1;
                     } else {

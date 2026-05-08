@@ -13,10 +13,10 @@
 #include "SubLineBuffer.h"
 
 void cnn_accelerator_top(
-    hls::stream<pixel_t>& pixels_in_stream,       
-    hls::stream<pixel_t>& residual_in_stream,     
-    hls::stream<weight_t>& weights_in_stream,     
-    hls::stream<fuse_vec_out_t>& fuse_out_stream, 
+    hls::stream<axi_word_t>& pixels_in_stream,       
+    hls::stream<axi_word_t>& residual_in_stream,     
+    hls::stream<axi_word_t>& weights_in_stream,     
+    hls::stream<axi_word_t>& fuse_out_stream, 
     ap_int<8> bias_array[MAX_CHANNELS],
     
     // --- Giao tiếp AXI-Lite ---

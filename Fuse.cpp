@@ -3,7 +3,7 @@
 void fuse_post_conv(
     hls::stream<fuse_vec_in_t>& conv_in,
     hls::stream<fuse_vec_in_t>& residual_in,
-    hls::stream<fuse_vec_out_t>& fuse_out,
+    hls::stream<axi_word_t>& fuse_out,     
     hls::stream<ap_int<8>>& bias_array,
     hls::stream<FuseConfig>& config_stream
 ) {
@@ -14,6 +14,9 @@ void fuse_post_conv(
     int channels = config.channel_limit;
     ap_int<8> shift_val = config.requant_shift_val;
 
+    // Tính toán Hardware channel boundary (bội số của 16)
+    int hw_channel_boundary = ((channels + 15) / 16) * 16;
+
     // 1. KHỞI TẠO LOCAL BIAS CACHE
     ap_int<8> local_bias[MAX_CHANNELS];
     #pragma HLS BIND_STORAGE variable=local_bias type=ram_2p impl=lutram
@@ -22,8 +25,17 @@ void fuse_post_conv(
     // 2. NẠP BIAS TỪ DRAM VÀO BRAM NỘI BỘ 
     load_bias_loop: for (int i = 0; i < channels; i++) {
         #pragma HLS PIPELINE II=1
+        #pragma HLS LOOP_TRIPCOUNT min=1 max=512 // Thêm dòng này
         local_bias[i] = bias_array.read();
     }
+    
+    // Gán các bias padding bằng 0
+    pad_bias_loop: for (int i = channels; i < hw_channel_boundary; i++) {
+        #pragma HLS PIPELINE II=1
+        #pragma HLS LOOP_TRIPCOUNT min=0 max=15 // Thêm dòng này
+        local_bias[i] = 0;
+    }
+
     ap_uint<16> c = 0; 
 
     process_stream: for (int p = 0; p < total_packets; p++) {
@@ -36,16 +48,20 @@ void fuse_post_conv(
             res_pkt = residual_in.read();
         }
 
-        fuse_vec_out_t out_pkt;
+        // BIẾN ĐÓNG GÓI 128-BIT (Chứa 16 pixels)
+        axi_word_t out_word = 0;
 
         process_elements: for (int i = 0; i < FUSE_PARALLEL_SIZE; i++) {
             #pragma HLS UNROLL 
             ap_uint<16> current_c; 
 
             if(config.mode == 0) {
+                // Chế độ Winograd xuất dữ liệu nhóm 4 pixels theo từng kênh
                 current_c = (c + (i / 4)) % channels;
             } else {
-                current_c = (c + i) % channels;
+                // Chế độ Systolic xuất mảng 16 kênh liên tiếp, không dùng modulo channels
+                // vì c sẽ chạy theo bước hw_channel_boundary
+                current_c = c + i; 
             }
 
             // --- BƯỚC 1: Đọc Psum (Int32) ---
@@ -54,7 +70,7 @@ void fuse_post_conv(
             // --- BƯỚC 2: Cộng Bias ---
             ap_int<32> with_bias = acc + local_bias[current_c];
 
-            // --- Bước 3: Activation (Leaky ReLU 0.1015625) ---
+            // --- Bước 3: Activation (Leaky ReLU ~0.1) ---
             ap_int<32> relu_mult = with_bias * 13;
             #pragma HLS BIND_OP variable=relu_mult op=mul impl=dsp
             ap_int<32> activated = (with_bias < 0) ? (ap_int<32>)(relu_mult >> 7) : with_bias;
@@ -69,30 +85,39 @@ void fuse_post_conv(
             ap_int<8> final_pixel = requantized;
             
             if (config.has_residual) {
-                ap_int<9> add_result = (ap_int<9>)requantized + (ap_int<9>)res_pkt.data[i];
+                // Ép dữ liệu đầu vào của residual thành int8 trước khi mở rộng lên int9
+                ap_int<8> res_val = (ap_int<8>)res_pkt.data[i];
+                ap_int<9> add_result = (ap_int<9>)requantized + (ap_int<9>)res_val;
                 
                 final_pixel = (add_result > 127) ? (ap_int<8>)127 : 
                               (add_result < -128) ? (ap_int<8>)-128 : (ap_int<8>)add_result;
             }
 
-            // --- BƯỚC 6: Channel Masking / Slice ---
-            if (current_c < config.channel_limit) {
-                out_pkt.data[i] = final_pixel;
+            // --- BƯỚC 6: Channel Masking / Slice & Pack 128-bit ---
+            if (current_c < channels) {
+                // Chỉ xuất các kênh có thực, còn lại (vùng độn thêm) gán 0
+                out_word.range(i * 8 + 7, i * 8) = (ap_uint<8>)final_pixel;
             } else {
-                out_pkt.data[i] = 0;
+                out_word.range(i * 8 + 7, i * 8) = 0;
             }
         }
         
-        fuse_out.write(out_pkt);
+        // Ghi trực tiếp chuỗi 128-bit ra kết quả
+        fuse_out.write(out_word);
 
+        // --- CẬP NHẬT CHỈ SỐ KÊNH HIỆN TẠI ---
         if (config.mode == 0) {
             c += (FUSE_PARALLEL_SIZE / 4);
+            while (c >= channels) {
+                c -= channels;
+            }
         } else {
             c += FUSE_PARALLEL_SIZE;
+            // Wrap vòng lặp dựa trên biến biên giới thực tế đã padding của Hardware
+            while (c >= hw_channel_boundary) {
+                c -= hw_channel_boundary;
+            }
         }        
-        while (c >= channels) {
-            c -= channels;
-        }
     }
 }
 

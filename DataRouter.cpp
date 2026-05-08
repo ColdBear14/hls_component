@@ -4,7 +4,7 @@ void weight_demux(
     hls::stream<weight_mat_t> &in_weight_stream, 
     hls::stream<ap_uint<2>>& mode_stream,                    
     hls::stream<weight_mat_t> &out_systolic_w,   
-    hls::stream<Tile4x4> &out_winograd_w,        
+    hls::stream<WeightBundle> &out_winograd_w,  // Đổi Tile4x4 -> WeightBundle
     hls::stream<DemuxWeightConfig>& config_stream                
 ) {
     #pragma HLS INLINE off
@@ -14,20 +14,27 @@ void weight_demux(
     ap_uint<2> sel_val = mode_stream.read();
 
     if (sel_val == 0) { // Chế độ Winograd Engine
-        demux_w_wino_loop: for (int i = 0; i < num_weight_vectors; i++) {
-            #pragma HLS PIPELINE II=1
-            weight_mat_t w_vec = in_weight_stream.read();
-            Tile4x4 temp_w_tile;
+        // Đọc COUT_UNROLL (4) vector mỗi lần để đóng gói thành 1 Bundle
+        demux_w_wino_loop: for (int i = 0; i < num_weight_vectors; i += COUT_UNROLL) {
+            #pragma HLS PIPELINE II=4 
             
-            unpack_row: for (int r = 0; r < 4; r++) {
+            WeightBundle bundle;
+
+            // Gom 4 vector 128-bit từ stream đầu vào
+            bundle_pack_loop: for (int u = 0; u < COUT_UNROLL; u++) {
                 #pragma HLS UNROLL
-                unpack_col: for (int c = 0; c < 4; c++) {
+                weight_mat_t w_vec = in_weight_stream.read();
+                
+                unpack_row: for (int r = 0; r < 4; r++) {
                     #pragma HLS UNROLL
-                    int idx = r * 4 + c;
-                    temp_w_tile.data[r][c] = (ap_int<8>)w_vec.range(idx * 8 + 7, idx * 8); 
+                    unpack_col: for (int c = 0; c < 4; c++) {
+                        #pragma HLS UNROLL
+                        int idx = r * 4 + c;
+                        bundle.weights[u].data[r][c] = (ap_int<8>)w_vec.range(idx * 8 + 7, idx * 8); 
+                    }
                 }
             }
-            out_winograd_w.write(temp_w_tile);
+            out_winograd_w.write(bundle);
         }
     }
     else { // Chế độ Systolic Array
@@ -38,6 +45,7 @@ void weight_demux(
     }
 }
 
+// Hàm data_demux giữ nguyên logic cũ
 void data_demux(
     hls::stream<Tile4x4> &in_stream,     
     hls::stream<ap_uint<2>>& mode_stream,            

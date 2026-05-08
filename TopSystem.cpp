@@ -3,15 +3,16 @@
 void read_axilite_bias(ap_int<8> bias_array[MAX_CHANNELS], hls::stream<ap_int<8>>& out_stream, int channels) {
     read_bias_loop: for (int i = 0; i < channels; i++) {
         #pragma HLS PIPELINE II=1
+        #pragma HLS LOOP_TRIPCOUNT min=1 max=512
         out_stream.write(bias_array[i]);
     }
 }
 
 void cnn_accelerator_top(
-    hls::stream<pixel_t>& pixels_in_stream,
-    hls::stream<pixel_t>& residual_in_stream,     
-    hls::stream<weight_t>& weights_in_stream,
-    hls::stream<fuse_vec_out_t>& fuse_out_stream,
+    hls::stream<axi_word_t>& pixels_in_stream,
+    hls::stream<axi_word_t>& residual_in_stream,
+    hls::stream<axi_word_t>& weights_in_stream,
+    hls::stream<axi_word_t>& fuse_out_stream,
     ap_int<8> bias_array[MAX_CHANNELS],
     LayerDescriptor descriptor,
     bool start_accel
@@ -20,6 +21,7 @@ void cnn_accelerator_top(
     #pragma HLS INTERFACE axis port=residual_in_stream
     #pragma HLS INTERFACE axis port=weights_in_stream
     #pragma HLS INTERFACE axis port=fuse_out_stream
+    
     
     #pragma HLS INTERFACE s_axilite port=bias_array bundle=CTRL
     #pragma HLS INTERFACE s_axilite port=descriptor bundle=CTRL
@@ -52,7 +54,6 @@ void cnn_accelerator_top(
 
     #pragma HLS stream variable=lb_config_stream depth=2
     #pragma HLS stream variable=wr_config_stream depth=2
-    // ... Khai báo depth=2 tương tự cho các luồng config khác nếu cần
 
     // -------------------------------------------------------------
     // 2. DATA PATH STREAMS 
@@ -80,14 +81,13 @@ void cnn_accelerator_top(
     #pragma HLS BIND_STORAGE variable=residual_to_fuse_stream type=fifo impl=srl
     #pragma HLS BIND_STORAGE variable=sys_to_mux_stream type=fifo impl=srl
     #pragma HLS BIND_STORAGE variable=mux_to_fuse_stream type=fifo impl=srl
-
     
     // -------------------------------------------------------------
     // 3. WEIGHT PATH STREAMS 
     // -------------------------------------------------------------
     hls::stream<weight_mat_t> weight_ram_to_router_stream("weight_ram_to_router");
     hls::stream<weight_mat_t> router_to_sys_weight("router_to_sys_weight");
-    hls::stream<Tile4x4>      router_to_wino_weight("router_to_wino_weight");
+    hls::stream<WeightBundle>      router_to_wino_weight("router_to_wino_weight");
 
     #pragma HLS stream variable=router_to_wino_weight       depth=16
     #pragma HLS stream variable=weight_ram_to_router_stream depth=16
@@ -95,14 +95,12 @@ void cnn_accelerator_top(
 
     #pragma HLS BIND_STORAGE variable=router_to_wino_weight type=fifo impl=srl
 
-
     // Đọc Bias
     read_axilite_bias(bias_array, internal_bias_stream, descriptor.Cout);
 
     // -------------------------------------------------------------
-    // 4. MODULE INSTANTIATIONS (DATAFLOW KẾT NỐI MẠNG)
+    // 4. MODULE INSTANTIATIONS
     // -------------------------------------------------------------
-    
     controller_top(
         descriptor, start_accel,
         mode_sys_stream, mode_wino_stream, mode_lb_stream, 

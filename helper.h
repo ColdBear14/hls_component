@@ -18,7 +18,7 @@ using namespace std;
 void golden_winograd(Tile4x4 d, Tile3x3 g, Tile2x2 &y_ref);
 void weight_transform(Tile3x3 g, Tile4x4 &V);
 
-void fill_pixel_stream(hls::stream<pixel_t>& stream, int width, int height, int Cin);
+void fill_axi_pixel_stream(hls::stream<axi_word_t>& in_stream, int W, int H, int Cin);
 void fill_weight_stream(hls::stream<weight_t>& stream, int kernel_size, int Cin, int Cout);
 void fill_Wino_weight_stream(weight_t* weight_mem, int kernel_size, int Cin, int Cout, hls::stream<weight_t>& output);
 

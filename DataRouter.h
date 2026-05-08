@@ -7,7 +7,7 @@ void weight_demux(
     hls::stream<weight_mat_t> &in_weight_stream, 
     hls::stream<ap_uint<2>>& mode_stream,                    
     hls::stream<weight_mat_t> &out_systolic_w,   
-    hls::stream<Tile4x4> &out_winograd_w,        
+    hls::stream<WeightBundle> &out_winograd_w,        
     hls::stream<DemuxWeightConfig>& config_stream                
 );
 

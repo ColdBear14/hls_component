@@ -3,94 +3,87 @@
 
 #include <ap_int.h>
 #include <hls_stream.h>
-#include <iostream>
-
-using namespace hls;
-using namespace std;
 
 // ==========================================================
-// 1. SYSTEM CONFIGURATION
+// 1. SYSTEM LIMITS & CONSTANTS
 // ==========================================================
-#define MAX_CHANNELS 512
-#define MAX_WIDTH    642    // 640 + 2 (padding)
-#define VECTOR_WIDTH 32     // 4 banks * 8-bit
-#define MAX_CIN      256    // Max in_channels ở khối SPPF
-#define MAX_COUT     256    // Max out_channels ở các khối Conv sâu
-#define MAX_COUT_BLOCKS 16  // 256 / 16
-#define MAX_TILES    1024 
+#define MAX_CHANNELS         512
+#define MAX_CIN              256    
+#define MAX_COUT             256    
+#define MAX_COUT_BLOCKS      16     // 256 / 16
 #define MAX_LINE_BUFFER_SIZE 32000
+#define ARRAY_SIZE           16     // Systolic Array Size (16x16)
+#define MAX_COUT_TILE 64
+
+// Cấu hình Weight RAM
+#define NUM_BANKS            16
+#define BANK_DEPTH           8096 
+
+// Cấu hình Winograd & Fuse
+#define COUT_UNROLL          4      // Số kênh tính song song trong Winograd
+#define FUSE_PARALLEL_SIZE   16     // Số phần tử xử lý song song tại khối Fuse
 
 // ==========================================================
 // 2. BASIC DATA TYPES
 // ==========================================================
-typedef ap_int<8>  pixel_t;     // Pixel / activation 8-bit
-typedef ap_int<8>  weight_t;    // Weight 8-bit
-typedef ap_int<32> data_t;      // Intermediate / accumulator data
-typedef ap_int<32> psum_t;      // Partial sum for MAC blocks
-
-#define MIN_INT8 -128
+typedef ap_uint<128> axi_word_t;      // Dữ liệu 128-bit từ AXI
+typedef ap_int<8>    pixel_t;       // Pixel / Activation 8-bit
+typedef ap_int<8>    weight_t;      // Weight 8-bit
+typedef ap_int<32>   data_t;        // Intermediate data
+typedef ap_int<32>   psum_t;        // Partial sum cho MAC
+typedef ap_uint<128> weight_mat_t;  // Vector chứa 16 weights (16 * 8-bit)
 
 // ==========================================================
-// 3. SYSTOLIC ARRAY & WEIGHT RAM
+// 3. ENGINE SPECIFIC STRUCTURES
 // ==========================================================
-const int ARRAY_SIZE  = 16;  // 16x16 PE array
-const int KERNEL_SIZE = 9;
-const int NUM_BANKS   = 16;
-const int BANK_DEPTH  = 8096; // 512 channels * 16 tiles max
 
-typedef ap_uint<128> weight_mat_t;
-
+// --- Systolic Array ---
 struct psum_block_t {
     psum_t data[ARRAY_SIZE];
 };
 
 struct SysWindow {
-    pixel_t data[9];
+    pixel_t data[9]; // Phẳng hóa cửa sổ 3x3 cho Systolic
 };
 
-// ==========================================================
-// 4. WINOGRAD TRANSFORM STRUCTURES
-// ==========================================================
-struct Tile16x16 { data_t data[16][16]; };
-struct Tile4x4   { data_t data[4][4]; };
-struct Tile3x3   { data_t data[3][3]; };
-struct Tile2x2   { data_t data[2][2]; };
+// --- Winograd ---
+struct Tile4x4 { data_t data[4][4]; };
+struct Tile3x3 { data_t data[3][3]; };
+struct Tile2x2 { data_t data[2][2]; };
 
-// ==========================================================
-// 5. FUSE MODULE
-// ==========================================================
-#define FUSE_PARALLEL_SIZE 16
+struct WeightBundle {
+    Tile4x4 weights[COUT_UNROLL];
+};
 
+// --- Line Buffer ---
+struct WindowVec16 {
+    pixel_t p[4][4][16]; // Lưu trữ cửa sổ cho 16 kênh song song
+};
+
+// --- Fuse ---
 struct fuse_vec_in_t {
     ap_int<32> data[FUSE_PARALLEL_SIZE];
 };
 
-struct fuse_vec_out_t {
-    ap_int<8> data[FUSE_PARALLEL_SIZE];
-};
+// ==========================================================
+// 4. LAYER DESCRIPTOR & CONFIGURATIONS
+// ==========================================================
 
-// ==========================================================
-// 6. LAYER DESCRIPTOR & CONFIG STRUCTS
-// ==========================================================
 struct LayerDescriptor {
-    ap_uint<2>  type;              // 0: Conv2D
-    ap_uint<16> W;                 // Feature map width
-    ap_uint<16> H;                 // Feature map height
-    ap_uint<16> Cin;               // Input channels
-    ap_uint<16> Cout;              // Output channels
-    ap_uint<2>  kernel_size;       // 1: 1x1, 3: 3x3
-    ap_uint<2>  stride;            // Stride (1 or 2)
-    ap_uint<2>  pad;               // Padding (0: no padding, 1: pad 1 pixel)
-    ap_uint<2>  has_residual;      // Có cộng skip connection không
-    ap_uint<8>  requant_shift_val; // Giá trị shift cho bước requantize
+    ap_uint<2>  type;              
+    ap_uint<16> W;                 
+    ap_uint<16> H;                 
+    ap_uint<16> Cin;               
+    ap_uint<16> Cout;              
+    ap_uint<2>  kernel_size;       
+    ap_uint<2>  stride;            
+    ap_uint<2>  pad;               
+    ap_uint<2>  has_residual;      
+    ap_uint<8>  requant_shift_val; 
 };
 
-// --- Các Struct đóng gói cấu hình truyền qua Stream ---
 struct LineBufferConfig {
-    int W;
-    int H;
-    int Cin;
-    int pad;
+    int W, H, Cin, pad;
 };
 
 struct WeightRamConfig {
@@ -108,15 +101,11 @@ struct DemuxWeightConfig {
 };
 
 struct SystolicConfig {
-    int Cin;
-    int Cout;
-    int tiles_per_ch;
+    int Cin, Cout, tiles_per_ch;
 };
 
 struct WinogradConfig {
-    int num_tiles;
-    int Cin;
-    int Cout;
+    int num_tiles, Cin, Cout;
 };
 
 struct SerializerConfig {
@@ -125,12 +114,12 @@ struct SerializerConfig {
 
 struct FuseConfig {
     bool has_residual;
-    int channel_limit;
-    int feature_map_width;
-    int feature_map_height;
+    int  channel_limit;
+    int  feature_map_width;
+    int  feature_map_height;
     ap_uint<8> requant_shift_val;
     ap_uint<2> mode;
-    int total_packets;
+    int  total_packets;
 };
 
 #endif // GLOBAL_H
