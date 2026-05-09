@@ -17,7 +17,9 @@ void sub_line_buffer_top(
     ap_uint<2> mode = residual_config.mode;
 
     if (mode == 0) {
-        // CHẾ ĐỘ WINOGRAD (Nhóm 4 pixels / 1 kênh)
+        // ================================
+        // Winograd path (unchanged)
+        // ================================
         int tiles_x = width / 2;
         int tiles_y = height / 2;
         int total_tiles = tiles_x * tiles_y;
@@ -51,24 +53,59 @@ void sub_line_buffer_top(
             }
         }
     } else {
-        // CHẾ ĐỘ SYSTOLIC (Nhóm 16 kênh / 1 pixel)
+        // Systolic path (CORRECTED)
         int cout_blocks = (channels + 15) / 16;
         int total_pixels = width * height;
+        int sys_tiles = (total_pixels + 15) / 16;
+
+        // FIX 1: Removed 'static' to prevent inter-invocation WAW/RAW dependencies.
+        pixel_t tile_buffer[16][16];
+        #pragma HLS BIND_STORAGE variable=tile_buffer type=ram_2p impl=bram
+        #pragma HLS ARRAY_PARTITION variable=tile_buffer complete dim=2
         
-        int total_reads = total_pixels * cout_blocks * 16; 
+        // FIX 2: Explicitly tell HLS to ignore false loop-carried dependencies on this buffer.
+        #pragma HLS DEPENDENCE variable=tile_buffer type=inter false
 
-        fuse_vec_in_t pkt;
-        int pack_idx = 0;
+        sys_tile_loop: for (int t = 0; t < sys_tiles; t++) {
+            int spatial_points = (t == sys_tiles - 1 && total_pixels % 16 != 0) ?
+                                 (total_pixels % 16) : 16;
 
-        sys_packing_loop: for (int i = 0; i < total_reads; i++) {
-            #pragma HLS PIPELINE II=1
-            
-            pkt.data[pack_idx] = residual_in.read();
-            pack_idx++;
+            sys_cb_loop: for (int cb = 0; cb < cout_blocks; cb++) {
+                
+                // --- Read all 16x16 values for this (tile, cout block) ---
+                read_spatial: for (int r = 0; r < 16; r++) {
+                    
+                    // FIX 3: Pipeline the INNER loop instead of unrolling it.
+                    read_ch: for (int c = 0; c < 16; c++) {
+                        #pragma HLS PIPELINE II=1
+                        
+                        pixel_t in_val = residual_in.read(); 
+                        
+                        if (r < spatial_points) {
+                            tile_buffer[r][c] = in_val;
+                        } else {
+                            // For padded spatial points, fill with zero
+                            tile_buffer[r][c] = 0;
+                        }
+                    }
+                }
 
-            if (pack_idx == FUSE_PARALLEL_SIZE) {
-                fuse_out.write(pkt);
-                pack_idx = 0;
+                // --- Output packets in REVERSE spatial order (15 -> 0) ---
+                output_rev_spatial: for (int r_out = 0; r_out < 16; r_out++) {
+                    #pragma HLS PIPELINE II=1
+                    fuse_vec_in_t pkt;
+                    int src_r = 15 - r_out;   // reverse index
+
+                    for (int c = 0; c < 16; c++) {
+                        #pragma HLS UNROLL
+                        if (src_r < spatial_points) {
+                            pkt.data[c] = tile_buffer[src_r][c];
+                        } else {
+                            pkt.data[c] = 0;
+                        }
+                    }
+                    fuse_out.write(pkt);
+                }
             }
         }
     }

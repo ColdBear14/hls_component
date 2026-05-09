@@ -14,6 +14,10 @@ void fuse_post_conv(
     int channels      = config.channel_limit;
     ap_int<8> shift_val = config.requant_shift_val;
 
+    // Calculate padded bounds to wrap the counter correctly
+    int cout_blocks = (channels + 15) / 16;
+    int padded_channels = cout_blocks * 16;
+
     // --- 1. LOCAL BIAS CACHE ---
     ap_int<8> local_bias[MAX_CHANNELS];
     #pragma HLS BIND_STORAGE variable=local_bias type=ram_2p impl=lutram
@@ -26,6 +30,7 @@ void fuse_post_conv(
     }
     
     ap_uint<16> c = 0; 
+    ap_uint<8> spatial_cnt = 0; // New counter for Systolic spatial blocks
 
     process_stream: for (int p = 0; p < total_packets; p++) {
         #pragma HLS PIPELINE II=1
@@ -43,12 +48,15 @@ void fuse_post_conv(
             #pragma HLS UNROLL 
             
             ap_uint<16> current_c = (config.mode == 0) ? 
-                                    (c + (i / 4)) % channels : 
-                                    (c + i) % channels;
+                                    (ap_uint<16>)(((int)c + (i / 4)) % channels) : 
+                                    (ap_uint<16>)((int)c + i);
+
+            // Protect against reading uninitialized BRAM memory beyond limit
+            ap_uint<16> valid_c = (current_c < channels) ? current_c : (ap_uint<16>)0;
 
             // Step 1 & 2: Read Psum & Add Bias
             ap_int<32> acc       = in_pkt.data[i];
-            ap_int<32> with_bias = acc + local_bias[current_c];
+            ap_int<32> with_bias = acc + local_bias[valid_c];
 
             // Step 3: Activation (Leaky ReLU)
             ap_int<32> relu_mult = with_bias * LEAKY_RELU_MULT;
@@ -71,14 +79,23 @@ void fuse_post_conv(
             }
 
             // Step 6: Channel Masking
-            out_pkt.data[i] = (current_c < config.channel_limit) ? final_pixel : (ap_int<8>)0;
+            out_pkt.data[i] = (current_c < channels) ? final_pixel : (ap_int<8>)0;
         }
         
         fuse_out.write(out_pkt);
 
-        // Update channel counter
-        c += (config.mode == 0) ? (FUSE_PARALLEL_SIZE / 4) : FUSE_PARALLEL_SIZE;
-        if (c >= channels) c -= channels;
+        // --- UPDATE COUNTERS BASED ON HARDWARE DRAIN MODE ---
+        if (config.mode == 0) {
+            c += (FUSE_PARALLEL_SIZE / 4);
+            if (c >= channels) c -= channels;
+        } else {
+            spatial_cnt++;
+            if (spatial_cnt == 16) { // Advance channel block only after 16 spatial pixels
+                spatial_cnt = 0;
+                c += FUSE_PARALLEL_SIZE;
+                if (c >= padded_channels) c = 0;
+            }
+        }
     }
 }
 

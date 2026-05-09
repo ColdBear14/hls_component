@@ -14,7 +14,7 @@ struct TestScenario {
     std::string desc;
 };
 
-void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int Cout, bool has_residual);
+int run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int Cout, bool has_residual);
 
 void TopSystem_TB();
 #endif // tb_top_system_H

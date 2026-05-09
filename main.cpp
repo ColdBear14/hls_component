@@ -8,11 +8,11 @@
 int main() {    
     // WinogradEngine_TB();
 
+    // SystolicEngine_TB();
+
     // tb_linebuffer();
 
     // tb_weight_ram();
-
-    // SystolicEngine_TB();
 
     TopSystem_TB();
     

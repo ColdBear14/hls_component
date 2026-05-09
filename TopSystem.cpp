@@ -53,40 +53,45 @@ void cnn_accelerator_top(
     #pragma HLS stream variable=wr_config_stream depth=2
 
     // --- 2. DATA PATH STREAMS ---
-    hls::stream<Tile4x4>       lb_to_router_stream("lb_to_router");
-    hls::stream<SysWindow>     router_to_sys_data("router_to_sys_data");
-    hls::stream<Tile4x4>       router_to_wino_data("router_to_wino_data");
-    hls::stream<psum_block_t>  sys_to_mux_stream("sys_to_mux_stream");
-    hls::stream<Tile2x2>       wino_to_mux_stream("wino_to_mux_stream");
-    hls::stream<fuse_vec_in_t> mux_to_fuse_stream("mux_to_fuse_stream");
-    hls::stream<fuse_vec_in_t> residual_to_fuse_stream("residual_to_fuse_stream");
-    hls::stream<ap_int<8>>     internal_bias_stream("internal_bias_stream");
+    hls::stream<Tile4x4>             lb_to_router_stream("lb_to_router");
+    hls::stream<systolic_data_t>     router_to_sys_data("router_to_sys_data");
+    hls::stream<Tile4x4>             router_to_wino_data("router_to_wino_data");
+    hls::stream<psum_block_t>        sys_to_mux_stream("sys_to_mux_stream");
+    hls::stream<Tile2x2>             wino_to_mux_stream("wino_to_mux_stream");
+    hls::stream<fuse_vec_in_t>       mux_to_fuse_stream("mux_to_fuse_stream");
+    hls::stream<fuse_vec_in_t>       residual_to_fuse_stream("residual_to_fuse_stream");
+    hls::stream<ap_int<8>>           internal_bias_stream("internal_bias_stream");
 
-    #pragma HLS stream variable=lb_to_router_stream     depth=16
-    #pragma HLS stream variable=router_to_sys_data      depth=16
-    #pragma HLS stream variable=router_to_wino_data     depth=16
-    #pragma HLS stream variable=sys_to_mux_stream       depth=16
-    #pragma HLS stream variable=wino_to_mux_stream      depth=16
-    #pragma HLS stream variable=mux_to_fuse_stream      depth=16
-    #pragma HLS stream variable=internal_bias_stream    depth=16
-    #pragma HLS stream variable=residual_to_fuse_stream depth=64
+    #pragma HLS stream variable=router_to_sys_data      depth=4
+    #pragma HLS stream variable=wino_to_mux_stream      depth=4
+    #pragma HLS stream variable=internal_bias_stream    depth=4
+    #pragma HLS stream variable=residual_to_fuse_stream depth=4
 
-    #pragma HLS BIND_STORAGE variable=lb_to_router_stream     type=fifo impl=srl
-    #pragma HLS BIND_STORAGE variable=router_to_wino_data     type=fifo impl=srl
-    #pragma HLS BIND_STORAGE variable=sys_to_mux_stream       type=fifo impl=srl
-    #pragma HLS BIND_STORAGE variable=mux_to_fuse_stream      type=fifo impl=srl
-    #pragma HLS BIND_STORAGE variable=residual_to_fuse_stream type=fifo impl=bram
     
     // --- 3. WEIGHT PATH STREAMS ---
     hls::stream<weight_mat_t> weight_ram_to_router_stream("weight_ram_to_router");
     hls::stream<weight_mat_t> router_to_sys_weight("router_to_sys_weight");
     hls::stream<Tile4x4>      router_to_wino_weight("router_to_wino_weight");
 
-    #pragma HLS stream variable=weight_ram_to_router_stream depth=16
-    #pragma HLS stream variable=router_to_sys_weight        depth=16
-    #pragma HLS stream variable=router_to_wino_weight       depth=16
+    #pragma HLS stream variable=weight_ram_to_router_stream depth=4
+    #pragma HLS stream variable=router_to_sys_weight        depth=4
 
+    #pragma HLS stream variable=router_to_wino_weight   depth=4
     #pragma HLS BIND_STORAGE variable=router_to_wino_weight type=fifo impl=srl
+
+    #pragma HLS stream variable=lb_to_router_stream     depth=4
+    #pragma HLS BIND_STORAGE variable=lb_to_router_stream type=fifo impl=srl
+
+    #pragma HLS stream variable=router_to_wino_data     depth=4
+    #pragma HLS BIND_STORAGE variable=router_to_wino_data type=fifo impl=srl
+
+    #pragma HLS stream variable=sys_to_mux_stream       depth=4
+    #pragma HLS BIND_STORAGE variable=sys_to_mux_stream type=fifo impl=srl
+
+    #pragma HLS stream variable=mux_to_fuse_stream      depth=4
+    #pragma HLS BIND_STORAGE variable=mux_to_fuse_stream type=fifo impl=srl
+
+
 
     // --- 4. MODULE INSTANTIATIONS (DATAFLOW) ---
     read_axilite_bias(bias_array, internal_bias_stream, descriptor.Cout);

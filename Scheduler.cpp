@@ -69,39 +69,45 @@ void controller_top(
 
         int total_tiles_per_channel = tiles_X * tiles_Y;
         int cout_blocks = (Cout + 15) / 16;
+
+        int sys_tiles = (total_tiles_per_channel + 15) / 16;
+        if (sys_tiles == 0) sys_tiles = 1;
         
         int wdemux_weights_val, wr_weights_val, packets_val;
         int serializer_reads_val;
 
-        // --- BƯỚC 1: TÍNH TOÁN TỔNG WEIGHTS YÊU CẦU CHO TỪNG MODE ---
-        if (mode == 0) {
-            wr_weights_val       = Cin * Cout;                              
-            packets_val          = (total_tiles_per_channel * Cout + 3) / 4; 
-            serializer_reads_val = total_tiles_per_channel * Cout;
-        } else {
-            int k_max            = (mode == 1) ? 9 : 1;
-            wr_weights_val       = k_max * Cin * cout_blocks;
-            packets_val          = total_tiles_per_channel * cout_blocks; 
-            serializer_reads_val = packets_val;
-        }
-        
-        // --- BƯỚC 2: LOGIC PHÂN PHA (PHASE-TILING) CHO BRAM ---
-        wdemux_weights_val = total_tiles_per_channel * wr_weights_val;
-
         int out_w = (mode == 0) ? (tiles_X * 2) : tiles_X;
         int out_h = (mode == 0) ? (tiles_Y * 2) : tiles_Y;
 
+        // --- BƯỚC 1: TÍNH TOÁN TỔNG WEIGHTS YÊU CẦU CHO TỪNG MODE ---
+        if (mode == 0) { // Winograd Engine
+            wr_weights_val       = Cin * Cout;                              
+            packets_val          = (total_tiles_per_channel * Cout + 3) / 4; 
+            serializer_reads_val = total_tiles_per_channel * Cout;
+            wdemux_weights_val   = total_tiles_per_channel * wr_weights_val;
+            
+            sys_cfg_stream.write({Cin, Cout, total_tiles_per_channel}); 
+            wr_cfg_stream.write({total_tiles_per_channel, wr_weights_val});
+        } else { // Systolic Array 2D (Mode 1 & 2)
+            int k_max            = (mode == 1) ? 9 : 1;
+            wr_weights_val       = k_max * Cin * cout_blocks;
+            
+            // Tổng số lượng packet xuất ra AXI DMA sẽ có thêm các pixel rác (Padding) để chẵn 16
+            packets_val          = sys_tiles * 16 * cout_blocks; 
+            serializer_reads_val = packets_val;
+            wdemux_weights_val   = sys_tiles * wr_weights_val;
+            
+            sys_cfg_stream.write({Cin, Cout, sys_tiles}); 
+            wr_cfg_stream.write({sys_tiles, wr_weights_val});
+        }
+        
+
         // --- BƯỚC 3: ĐÓNG GÓI VÀ GHI VÀO LUỒNG CẤU HÌNH ---
         lb_cfg_stream.write({W, H, Cin, pad});
-        
-        wr_cfg_stream.write({total_tiles_per_channel, wr_weights_val});
-        
-        ddemux_cfg_stream.write({total_tiles_per_channel, Cin});
+        ddemux_cfg_stream.write({total_tiles_per_channel, Cin}); // Ddemux vẫn cần đếm pixel lẻ
         wdemux_cfg_stream.write({wdemux_weights_val});
-        
-        sys_cfg_stream.write({Cin, Cout, total_tiles_per_channel});
         wino_cfg_stream.write({total_tiles_per_channel, Cin, Cout});
-        serializer_cfg_stream.write({serializer_reads_val});   
+        serializer_cfg_stream.write({serializer_reads_val});  
              
         FuseConfig f_cfg;
         f_cfg.has_residual       = descriptor.has_residual;

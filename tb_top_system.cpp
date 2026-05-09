@@ -4,7 +4,7 @@
 #include "tb_top_system.h"
 #include <algorithm> // Cho std::min
 
-void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int Cout, bool has_residual) {
+int run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int Cout, bool has_residual) {
 
     int K;
     if (mode == 2) K = 1;
@@ -50,7 +50,7 @@ void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int C
     
     int cout_step = std::min(Cout, max_cout_step);
     
-    std::cout << "  -> Tiên đoán BRAM: Chia tính toán làm các chunk có Cout = " 
+    std::cout << "Chia tính toán làm các chunk có Cout = " 
               << cout_step << " / " << Cout << std::endl;
 
     // Các streams dùng cho phần cứng
@@ -99,33 +99,40 @@ void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int C
                     }
                 }
             } else {
+                int sys_tiles_residual = (OUT_W * OUT_H + 15) / 16;
                 int current_cout_blocks = (current_cout + 15) / 16;
-                for (int t = 0; t < OUT_W * OUT_H; t++) {
+                
+                for (int tile = 0; tile < sys_tiles_residual; tile++) {
                     for (int cb = 0; cb < current_cout_blocks; cb++) {
-                        for (int c = 0; c < 16; c++) {
-                            int co = cb * 16 + c;
-                            int global_c = cout_start + co;
-                            if (co < current_cout) {
-                                residual_in.write(residual_mem[t * Cout + global_c]);
-                            } else {
-                                residual_in.write(0);
+                        for (int r = 0; r < 16; r++) { 
+                            int t = tile * 16 + r;
+                            for (int c = 0; c < 16; c++) {
+                                int co = cb * 16 + c;
+                                int global_c = cout_start + co;
+                                
+                                if (t < OUT_W * OUT_H && co < current_cout) {
+                                    residual_in.write(residual_mem[t * Cout + global_c]);
+                                } else {
+                                    residual_in.write(0);
+                                }
                             }
                         }
                     }
                 }
-            }
-        } 
+            } 
+        }
 
         // C. Bơm Weight (Chỉ lấy weight cho các kênh Output hiện tại)
         if (mode == 0) {
             // Lấy con trỏ dịch đến đúng offset của cout_start
             fill_Wino_weight_stream(weight_mem + (cout_start * Cin * K * K), K, Cin, current_cout, weight_in);
         } else {
+            // SỬA: Lật vòng lặp Cout_blocks (cb) ra ngoài cùng để khớp nhịp với Engine
             int current_cout_blocks = (current_cout + 15) / 16;
-            for (int ci = 0; ci < Cin; ci++) {
-                for (int ky = 0; ky < K; ky++) {
-                    for (int kx = 0; kx < K; kx++) {
-                        for (int cb = 0; cb < current_cout_blocks; cb++) {
+            for (int cb = 0; cb < current_cout_blocks; cb++) {
+                for (int ci = 0; ci < Cin; ci++) {
+                    for (int ky = 0; ky < K; ky++) {
+                        for (int kx = 0; kx < K; kx++) {
                             for (int c = 0; c < 16; c++) {
                                 int co = cb * 16 + c;
                                 int global_c = cout_start + co;
@@ -165,12 +172,19 @@ void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int C
         // --- 6. THU THẬP VÀ GÁN DỮ LIỆU ĐÚNG OFFSET ---
         int tiles_x = OUT_W / 2; if (tiles_x == 0) tiles_x = 1; 
         int tiles_y = OUT_H / 2; if (tiles_y == 0) tiles_y = 1;
+
+        int sys_tiles = (OUT_W * OUT_H + 15) / 16;
+        if (sys_tiles == 0) sys_tiles = 1;
         
         int expected_packets = 0;
         int current_cout_blocks = (current_cout + 15) / 16;
         
-        if (mode == 0) expected_packets = tiles_x * tiles_y * ((current_cout + 3) / 4);
-        else           expected_packets = OUT_W * OUT_H * current_cout_blocks;
+        if (mode == 0) {
+            expected_packets = tiles_x * tiles_y * ((current_cout + 3) / 4);
+        } else {
+            // Ép AXI DMA đọc sạch luồng kể cả các packet padding thêm vào để chẵn 16
+            expected_packets = sys_tiles * 16 * current_cout_blocks;
+        }
 
         int c = 0, t = 0;
         for (int p = 0; p < expected_packets; ++p) {
@@ -212,18 +226,24 @@ void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int C
                     if (c >= current_cout) { c = 0; t++; }
                 }
             } else {
+                // Decode packet index to determine hardware coordinate
+                int tile = p / (16 * current_cout_blocks);
+                int rem  = p % (16 * current_cout_blocks);
+                int cb   = rem / 16;
+                int r    = 15 - (rem % 16);
+                int t    = tile * 16 + r;
+
                 int global_y = t / OUT_W;
                 int global_x = t % OUT_W;
-                int cb = p % current_cout_blocks;
                 
                 for (int ch = 0; ch < 16; ch++) {
                     int co = cb * 16 + ch;
                     int global_co = cout_start + co;
-                    if (co < current_cout && global_y < OUT_H && global_x < OUT_W) {
+                    
+                    if (co < current_cout && global_y < OUT_H && global_x < OUT_W && t < OUT_W * OUT_H) {
                         hw_output[(global_y * OUT_W + global_x) * Cout + global_co] = hw_packet.data[ch];
                     }
                 }
-                if (cb == current_cout_blocks - 1) t++;
             }
         }
     }
@@ -252,6 +272,8 @@ void run_top_system_test(int mode, int IMG_W, int IMG_H, int pad, int Cin, int C
     delete[] residual_mem;
     delete[] hw_output;
     delete[] gold_output;
+
+    return errors;
 }
 
 void TopSystem_TB() {
@@ -263,33 +285,33 @@ void TopSystem_TB() {
         {0, 16, 16, 1, 3,  8,  true,  "Winograd 3x3 (Pad=1)"},
         {1, 16, 16, 1, 3,  8,  true,  "Systolic 3x3 S2 (Pad=1)"},
 
-        // // --- 2. CÁC SCENARIO THỰC TẾ TỪ YOLOv8n (INPUT 640x640) ---
-        // // [Stage 0] Stem Layer: Lớp đầu tiên của mạng, chuyển từ ảnh RGB (3 channel) sang 16 channel
-        // {1, 640, 640, 1, 3,  16, false, "YOLOv8n Stem: 640x640, 3x3 S2, C:3->16"},
+        // --- 2. CÁC SCENARIO THỰC TẾ TỪ YOLOv8n (INPUT 640x640) ---
+        // [Stage 0] Stem Layer: Lớp đầu tiên của mạng, chuyển từ ảnh RGB (3 channel) sang 16 channel
+        {1, 640, 640, 1, 3,  16, false, "YOLOv8n Stem: 640x640, 3x3 S2, C:3->16"},
 
-        // // [Stage 1] Downsample 1: Giảm kích thước ảnh xuống 1/4 (160x160)
-        // {1, 320, 320, 1, 16, 32, false, "YOLOv8n Down1: 320x320, 3x3 S2, C:16->32"},
+        // [Stage 1] Downsample 1: Giảm kích thước ảnh xuống 1/4 (160x160)
+        {1, 320, 320, 1, 16, 32, false, "YOLOv8n Down1: 320x320, 3x3 S2, C:16->32"},
 
-        // // [Stage 2] C2f Bottleneck 1: Dùng Conv 3x3, Stride 1, có cộng Residual
-        // {0, 160, 160, 1, 32, 32, true,  "YOLOv8n C2f-B1: 160x160, 3x3 S1, C:32->32 (Wino+Res)"},
+        // [Stage 2] C2f Bottleneck 1: Dùng Conv 3x3, Stride 1, có cộng Residual
+        {0, 160, 160, 1, 32, 32, true,  "YOLOv8n C2f-B1: 160x160, 3x3 S1, C:32->32 (Wino+Res)"},
 
-        // // [Stage 3] Downsample 2: Giảm xuống 80x80
-        // {1, 160, 160, 1, 32, 64, false, "YOLOv8n Down2: 160x160, 3x3 S2, C:32->64"},
+        // [Stage 3] Downsample 2: Giảm xuống 80x80
+        {1, 160, 160, 1, 32, 64, false, "YOLOv8n Down2: 160x160, 3x3 S2, C:32->64"},
 
-        // // [Stage 4] C2f Bottleneck 2 (1x1 Conv): Lớp gộp kênh đầu vào trong khối C2f
-        // {2, 80,  80,  0, 64, 64, false, "YOLOv8n C2f-1x1: 80x80, 1x1 S1, C:64->64 (Sys)"},
+        // [Stage 4] C2f Bottleneck 2 (1x1 Conv): Lớp gộp kênh đầu vào trong khối C2f
+        {2, 80,  80,  0, 64, 64, false, "YOLOv8n C2f-1x1: 80x80, 1x1 S1, C:64->64 (Sys)"},
 
-        // // [Stage 5] Downsample 3: Giảm xuống 40x40
-        // {1, 80,  80,  1, 64, 128, false, "YOLOv8n Down3: 80x80, 3x3 S2, C:64->128"},
+        // [Stage 5] Downsample 3: Giảm xuống 40x40
+        {1, 80,  80,  1, 64, 128, false, "YOLOv8n Down3: 80x80, 3x3 S2, C:64->128"},
 
-        // // [Stage 6] C2f Bottleneck 3 (Deeper): 40x40 xử lý Winograd với số kênh lớn hơn
-        // {0, 40,  40,  1, 128, 128, true, "YOLOv8n C2f-B3: 40x40, 3x3 S1, C:128->128 (Wino+Res)"},
+        // [Stage 6] C2f Bottleneck 3 (Deeper): 40x40 xử lý Winograd với số kênh lớn hơn
+        {0, 40,  40,  1, 128, 128, true, "YOLOv8n C2f-B3: 40x40, 3x3 S1, C:128->128 (Wino+Res)"},
 
-        // // [Stage 7] Downsample 4: Giảm xuống độ phân giải nhỏ nhất 20x20
-        // {1, 40,  40,  1, 128, 256, false, "YOLOv8n Down4: 40x40, 3x3 S2, C:128->256"},
+        // [Stage 7] Downsample 4: Giảm xuống độ phân giải nhỏ nhất 20x20
+        {1, 40,  40,  1, 128, 256, false, "YOLOv8n Down4: 40x40, 3x3 S2, C:128->256"},
 
-        // // [Stage 8] Khối SPPF / Head: Dùng nhiều Conv 1x1 ở độ phân giải 20x20
-        // {2, 20,  20,  0, 256, 256, false, "YOLOv8n SPPF/Head: 20x20, 1x1 S1, C:256->256 (Sys)"}
+        // [Stage 8] Khối SPPF / Head: Dùng nhiều Conv 1x1 ở độ phân giải 20x20
+        {2, 20,  20,  0, 256, 256, false, "YOLOv8n SPPF/Head: 20x20, 1x1 S1, C:256->256 (Sys)"}
     };
 
     int pass_count = 0;
@@ -299,7 +321,7 @@ void TopSystem_TB() {
                   << ": " << scenarios[i].desc << " <<<" << std::endl;
         
         try {
-            run_top_system_test(
+            int errors = run_top_system_test(
                 scenarios[i].mode, 
                 scenarios[i].img_w, 
                 scenarios[i].img_h, 
@@ -308,7 +330,9 @@ void TopSystem_TB() {
                 scenarios[i].cout, 
                 scenarios[i].has_residual
             );
-            pass_count++;
+            if (errors == 0) {
+                pass_count++;
+            }
         } catch (...) {
             std::cerr << "!!! EXCEPTION CAUGHT IN TEST " << i + 1 << " !!!" << std::endl;
         }

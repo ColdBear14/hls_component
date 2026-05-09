@@ -37,6 +37,7 @@ const int NUM_BANKS   = 16;
 const int BANK_DEPTH  = 8096; // 512 channels * 16 tiles max
 
 typedef ap_uint<128> weight_mat_t;
+typedef ap_uint<128> systolic_data_t;
 
 struct psum_block_t { psum_t data[ARRAY_SIZE]; };
 struct SysWindow    { pixel_t data[KERNEL_SIZE]; };

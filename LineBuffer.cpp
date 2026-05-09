@@ -21,7 +21,7 @@ void line_buffer(
     // KHAI BÁO MẢNG LINE_BUF
     static pixel_t line_buf[3][MAX_LINE_BUFFER_SIZE];
     #pragma HLS ARRAY_PARTITION variable=line_buf complete dim=1
-    #pragma HLS BIND_STORAGE variable=line_buf type=ram_2p impl=bram
+    #pragma HLS BIND_STORAGE variable=line_buf type=ram_2p impl=uram
     
     // KHAI BÁO MẢNG WINDOW (Lưu trên BRAM)
     static pixel_t window[4][4][MAX_CIN];

@@ -27,7 +27,9 @@ void ewmm(Tile4x4 U, Tile4x4 V, Tile4x4 &M) {
         #pragma HLS UNROLL
         for (int j = 0; j < 4; j++) {
             #pragma HLS UNROLL
-            M.data[i][j] = U.data[i][j] * V.data[i][j];
+            data_t temp = U.data[i][j] * V.data[i][j];
+            #pragma HLS BIND_OP variable=temp op=mul impl=dsp
+            M.data[i][j] = temp;
         }
     }
 }
